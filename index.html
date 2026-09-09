@@ -914,32 +914,11 @@ function buildExportSVG(){
   bg.setAttribute('fill', state.ribbonColor);
   svg.appendChild(bg);
 
-  // línea de corte: borde real de la cinta (3 cm), dentro del sangrado de 3mm arriba/abajo
-  [bleedMm, hMm - bleedMm].forEach(yy=>{
-    const line = document.createElementNS(ns,'line');
-    line.setAttribute('x1', 0); line.setAttribute('x2', wMm);
-    line.setAttribute('y1', yy); line.setAttribute('y2', yy);
-    line.setAttribute('stroke', '#c0392b');
-    line.setAttribute('stroke-width', 0.4);
-    line.setAttribute('stroke-dasharray', '1.5,1.5');
-    line.setAttribute('opacity', 0.7);
-    svg.appendChild(line);
-  });
-
-  // guía del área de impresión (55 x 2,2 cm), centrada dentro de la cinta real
+  // (sin líneas de guía: el archivo descargado va limpio, sin marcas de sangrado ni de área de impresión)
   const pxMm = MARGIN_X_CM*MM_PER_CM;
   const pyMm = bleedMm + MARGIN_Y_CM*MM_PER_CM;
   const pwMm = PRINT_LEN_CM*MM_PER_CM;
   const phMm = PRINT_WID_CM*MM_PER_CM;
-  const printGuide = document.createElementNS(ns,'rect');
-  printGuide.setAttribute('x', pxMm); printGuide.setAttribute('y', pyMm);
-  printGuide.setAttribute('width', pwMm); printGuide.setAttribute('height', phMm);
-  printGuide.setAttribute('fill', 'none');
-  printGuide.setAttribute('stroke', '#3f9fd6');
-  printGuide.setAttribute('stroke-width', 0.5);
-  printGuide.setAttribute('stroke-dasharray', '3,2');
-  printGuide.setAttribute('opacity', 0.6);
-  svg.appendChild(printGuide);
 
   appendDesignElements(svg, pxMm, pwMm, pyMm + phMm/2);
   return svg;
