@@ -554,7 +554,7 @@ let state = {
   logoDataUrl: null,
   logoSizeCm: 1.8,
 };
-let currentZoom = 'fit';
+let currentZoom = (window.innerWidth <= 860) ? '0.5' : 'fit';
 
 const $ = id => document.getElementById(id);
 
@@ -906,6 +906,9 @@ function render(){
   checkOverflow(ribbonSvg);
 }
 window.addEventListener('resize', render);
+document.querySelectorAll('.zoom button').forEach(b=>{
+  b.classList.toggle('active', b.dataset.zoom === currentZoom);
+});
 toggleSubopts();
 render();
 if(document.fonts && document.fonts.ready){ document.fonts.ready.then(render); }
