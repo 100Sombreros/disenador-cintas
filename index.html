@@ -240,6 +240,12 @@
   .actions button:disabled{
     opacity:.4; cursor:not-allowed;
   }
+  .ficha-toggle{
+    display:flex; align-items:flex-start; gap:8px; width:100%;
+    margin:0 0 2px; font-size:12.5px; color:var(--dim); cursor:pointer;
+  }
+  .ficha-toggle input{ margin-top:3px; accent-color:var(--orange); }
+  .export-status{ font-size:12px; color:var(--dim); min-height:1em; }
 
   .stage-head{
     display:flex; justify-content:space-between; align-items:baseline; flex-wrap:wrap; gap:10px;
@@ -505,6 +511,7 @@
     <p class="note">La vista en pantalla es orientativa (depende de tu monitor). Para el <strong>tamaño real garantizado</strong>, usa "Descargar SVG" (vectorial, para imprenta o plotter), "Descargar PNG 300dpi" o "Imprimir plantilla". Los tres exportan la <strong>cinta completa</strong>: 69 × 3,6 cm (69 cm de largo, y 3,6 cm de ancho ya con los 3 mm de sangrado incluidos arriba y abajo). "Distancia entre laterales / entre pares" es el hueco libre entre el borde de un elemento (o par) y el siguiente, no entre sus centros.</p>
 
     <div class="actions">
+      <label class="ficha-toggle"><input type="checkbox" id="fichaToggle" checked><span>Incluir ficha con los datos del diseño (colores RGB, tipografía y alturas) en las descargas SVG y PNG</span></label>
       <label for="paperSize" style="align-self:center; margin:0 4px 0 0; color:var(--dim);">Papel:</label>
       <select id="paperSize" style="flex:0 0 140px;">
         <option value="a4" selected>A4</option>
@@ -514,6 +521,7 @@
       <button id="btnPng">Descargar PNG 300dpi</button>
       <button id="btnPrint" class="primary">Imprimir plantilla a tamaño real</button>
     </div>
+    <div class="export-status" id="exportStatus" role="status" aria-live="polite"></div>
   </section>
 </main>
 
@@ -521,6 +529,15 @@
 <svg id="measureSvg" style="position:absolute; width:0; height:0; overflow:hidden; visibility:hidden;" aria-hidden="true"></svg>
 
 <script>
+// --- AYUDA TEMPORAL DE DIAGNÓSTICO: si algo falla, lo muestra en pantalla ---
+// (se puede quitar en cuanto encontremos y arreglemos el problema)
+window.addEventListener('error', function(e){
+  var div = document.createElement('div');
+  div.style.cssText = 'position:fixed;top:0;left:0;right:0;background:#c0392b;color:#fff;padding:10px 14px;font-family:monospace;font-size:12px;z-index:99999;white-space:pre-wrap;box-shadow:0 2px 8px rgba(0,0,0,.4);';
+  div.textContent = 'ERROR JS: ' + e.message + '  (archivo: ' + (e.filename||'?').split('/').pop() + ', línea ' + e.lineno + ', columna ' + e.colno + ')';
+  document.body.prepend(div);
+});
+
 const MM_PER_CM = 10;
 const PX_PER_MM = 96/25.4; // referencia CSS a 96dpi
 
@@ -947,48 +964,267 @@ function buildExportSVG(){
   return svg;
 }
 
-$('btnSvg').addEventListener('click', ()=>{
+// ---------- descargas SVG / PNG: tipografía incrustada + ficha de datos ----------
+let exportBusy = false;
+const fontCssCache = {};
+
+function setExportStatus(msg){
+  const el = $('exportStatus');
+  if(el) el.textContent = msg || '';
+}
+function hexToRgb(hex){
+  const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex || '');
+  if(!m) return {r:0, g:0, b:0};
+  return {r:parseInt(m[1],16), g:parseInt(m[2],16), b:parseInt(m[3],16)};
+}
+function colorLabel(hex){
+  const c = hexToRgb(hex);
+  return 'RGB ' + c.r + ', ' + c.g + ', ' + c.b + '  (' + String(hex).toUpperCase() + ')';
+}
+function fmtCm(n){ return String(Math.round(n*100)/100).replace('.', ','); }
+function fontFamilyName(){
+  const m = /^\s*['"]?([^'",]+)['"]?/.exec(state.textFont);
+  return m ? m[1].trim() : String(state.textFont);
+}
+function textPresent(){ return state.textMode !== 'none' && state.textContent.trim() !== ''; }
+function logoPresent(){ return state.logoMode !== 'none' && !!state.logoDataUrl; }
+
+function arrayBufferToBase64(buf){
+  const bytes = new Uint8Array(buf);
+  let bin = '';
+  const chunk = 0x8000;
+  for(let i=0; i<bytes.length; i+=chunk){
+    bin += String.fromCharCode.apply(null, bytes.subarray(i, i+chunk));
+  }
+  return btoa(bin);
+}
+
+// Devuelve "Familia:wght@N" con el mismo peso que el navegador usa en pantalla
+// (el que carga el <link> de Google Fonts de esta página).
+function googleFontQuery(family){
+  const link = document.querySelector('link[href*="fonts.googleapis.com/css2"]');
+  if(!link) return null;
+  const href = link.getAttribute('href');
+  const parts = (href.split('?')[1] || '').split('&');
+  for(let i=0; i<parts.length; i++){
+    const p = parts[i];
+    if(p.indexOf('family=') !== 0) continue;
+    const spec = p.slice(7);
+    const rawName = spec.split(':')[0];
+    if(decodeURIComponent(rawName.replace(/\+/g,' ')) !== family) continue;
+    const wm = /wght@([\d;]+)$/.exec(spec);
+    if(!wm) return rawName;
+    const ws = wm[1].split(';').map(Number);
+    let w;
+    if(ws.indexOf(400) >= 0) w = 400;
+    else if(ws.indexOf(500) >= 0) w = 500;
+    else {
+      const up = ws.filter(function(x){ return x > 400; }).sort(function(a,b){ return a-b; });
+      w = up.length ? up[0] : Math.max.apply(null, ws);
+    }
+    return rawName + ':wght@' + w;
+  }
+  return null;
+}
+
+// Descarga la tipografía de Google Fonts y la devuelve como @font-face con los datos incrustados (base64).
+async function getEmbeddedFontCss(family){
+  if(fontCssCache[family] !== undefined) return fontCssCache[family];
+  const q = googleFontQuery(family);
+  if(!q) return '';
+  const cssRes = await fetch('https://fonts.googleapis.com/css2?family=' + q + '&display=swap');
+  if(!cssRes.ok) throw new Error('css ' + cssRes.status);
+  const css = await cssRes.text();
+  const re = /\/\*\s*([\w-]+)\s*\*\/\s*(@font-face\s*\{[^}]*\})/g;
+  const wanted = ['latin', 'latin-ext'];
+  let blocks = [];
+  let m;
+  while((m = re.exec(css)) !== null){
+    if(wanted.indexOf(m[1]) >= 0) blocks.push(m[2]);
+  }
+  if(!blocks.length) blocks = css.match(/@font-face\s*\{[^}]*\}/g) || [];
+  let out = '';
+  for(let i=0; i<blocks.length; i++){
+    let block = blocks[i];
+    const u = /url\((https:[^)]+)\)/.exec(block);
+    if(!u) continue;
+    const fr = await fetch(u[1]);
+    if(!fr.ok) throw new Error('font ' + fr.status);
+    const b64 = arrayBufferToBase64(await fr.arrayBuffer());
+    block = block.replace(u[1], 'data:font/woff2;base64,' + b64);
+    out += block + '\n';
+  }
+  fontCssCache[family] = out;
+  return out;
+}
+
+function buildFichaLines(){
+  const lines = [];
+  lines.push({label:'Color de la cinta:', value:colorLabel(state.ribbonColor), swatch:state.ribbonColor});
+  if(textPresent()){
+    lines.push({label:'Tipografía:', value:fontFamilyName() + '  —  altura ' + fmtCm(state.textSizeCm) + ' cm'});
+    lines.push({label:'Color de la tipografía:', value:colorLabel(state.textColor), swatch:state.textColor});
+  }
+  if(logoPresent()){
+    lines.push({label:'Altura del logotipo:', value:fmtCm(state.logoSizeCm) + ' cm'});
+  }
+  return lines;
+}
+
+// Añade la ficha debajo del diseño (no toca el área del diseño). Devuelve la altura total en mm.
+function appendFicha(svg, wMm, artHMm, lines){
+  const ns = 'http://www.w3.org/2000/svg';
+  const fs = 5, lineH = fs*1.75, pad = 6;
+  const titleH = lineH;
+  const fichaH = pad*2 + titleH + lines.length*lineH;
+  const totalH = artHMm + fichaH;
+  svg.setAttribute('viewBox', '0 0 ' + wMm + ' ' + totalH);
+  svg.setAttribute('height', totalH + 'mm');
+
+  const bg = document.createElementNS(ns, 'rect');
+  bg.setAttribute('x', 0); bg.setAttribute('y', artHMm);
+  bg.setAttribute('width', wMm); bg.setAttribute('height', fichaH);
+  bg.setAttribute('fill', '#ffffff');
+  svg.appendChild(bg);
+
+  const x0 = pad + fs + 2.5;
+  const title = document.createElementNS(ns, 'text');
+  title.setAttribute('x', pad); title.setAttribute('y', artHMm + pad + fs*1.05);
+  title.setAttribute('font-family', 'Arial, Helvetica, sans-serif');
+  title.setAttribute('font-size', fs); title.setAttribute('font-weight', 'bold');
+  title.setAttribute('fill', '#222222');
+  title.textContent = 'FICHA DEL DISEÑO';
+  svg.appendChild(title);
+
+  lines.forEach(function(l, i){
+    const top = artHMm + pad + titleH + i*lineH;
+    const base = top + fs*1.05;
+    if(l.swatch){
+      const sw = document.createElementNS(ns, 'rect');
+      sw.setAttribute('x', pad); sw.setAttribute('y', base - fs*0.85);
+      sw.setAttribute('width', fs*0.9); sw.setAttribute('height', fs*0.9);
+      sw.setAttribute('fill', l.swatch);
+      sw.setAttribute('stroke', '#999999'); sw.setAttribute('stroke-width', 0.3);
+      svg.appendChild(sw);
+    }
+    const t = document.createElementNS(ns, 'text');
+    t.setAttribute('x', x0); t.setAttribute('y', base);
+    t.setAttribute('font-family', 'Arial, Helvetica, sans-serif');
+    t.setAttribute('font-size', fs); t.setAttribute('fill', '#222222');
+    const a = document.createElementNS(ns, 'tspan');
+    a.setAttribute('font-weight', 'bold');
+    a.textContent = l.label;
+    const b = document.createElementNS(ns, 'tspan');
+    b.setAttribute('dx', 2);
+    b.textContent = l.value;
+    t.appendChild(a); t.appendChild(b);
+    svg.appendChild(t);
+  });
+  return totalH;
+}
+
+// Construye el SVG de descarga: diseño + tipografía incrustada + datos (<desc> siempre, ficha visible opcional)
+async function buildDownloadSVG(){
+  const ns = 'http://www.w3.org/2000/svg';
   const svg = buildExportSVG();
-  const xml = '<?xml version="1.0" encoding="UTF-8"?>\n' + new XMLSerializer().serializeToString(svg);
-  const blob = new Blob([xml], {type:'image/svg+xml'});
+  const wMm = EXPORT_LEN_CM * MM_PER_CM;
+  const artHMm = EXPORT_WID_CM * MM_PER_CM;
+  const lines = buildFichaLines();
+
+  let fontOk = true;
+  if(textPresent()){
+    try{
+      const css = await getEmbeddedFontCss(fontFamilyName());
+      if(css){
+        const defs = document.createElementNS(ns, 'defs');
+        const style = document.createElementNS(ns, 'style');
+        style.setAttribute('type', 'text/css');
+        style.textContent = css;
+        defs.appendChild(style);
+        svg.insertBefore(defs, svg.firstChild);
+      } else {
+        fontOk = false;
+      }
+    }catch(e){
+      fontOk = false;
+    }
+  }
+
+  const desc = document.createElementNS(ns, 'desc');
+  desc.textContent = lines.map(function(l){ return l.label + ' ' + l.value; }).join(' | ');
+  svg.insertBefore(desc, svg.firstChild);
+
+  let hMm = artHMm;
+  const toggle = $('fichaToggle');
+  if(toggle && toggle.checked) hMm = appendFicha(svg, wMm, artHMm, lines);
+  return {svg:svg, wMm:wMm, hMm:hMm, fontOk:fontOk};
+}
+
+function triggerDownload(blob, filename){
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
-  a.href = url; a.download = 'cinta-100sombreros.svg';
+  a.href = url; a.download = filename;
+  document.body.appendChild(a);
   a.click();
-  URL.revokeObjectURL(url);
+  document.body.removeChild(a);
+  setTimeout(function(){ URL.revokeObjectURL(url); }, 2000);
+}
+const FONT_WARNING = 'No se pudo incrustar la tipografía (sin conexión con Google Fonts). El archivo se ha descargado, pero puede mostrarse con otra tipografía.';
+
+$('btnSvg').addEventListener('click', async function(){
+  if(exportBusy) return;
+  exportBusy = true;
+  setExportStatus('Preparando SVG…');
+  try{
+    const res = await buildDownloadSVG();
+    const xml = '<?xml version="1.0" encoding="UTF-8"?>\n' + new XMLSerializer().serializeToString(res.svg);
+    triggerDownload(new Blob([xml], {type:'image/svg+xml;charset=utf-8'}), 'cinta-100sombreros.svg');
+    setExportStatus(res.fontOk ? '' : FONT_WARNING);
+  }catch(err){
+    setExportStatus('No se pudo generar el SVG.');
+  }finally{
+    exportBusy = false;
+  }
 });
 
-$('btnPng').addEventListener('click', ()=>{
-  const wMm = EXPORT_LEN_CM * MM_PER_CM;
-  const hMm = EXPORT_WID_CM * MM_PER_CM;
-  let dpi = 300;
-  let pxW = Math.round(wMm/25.4*dpi);
-  let pxH = Math.round(hMm/25.4*dpi);
-  const MAX_DIM = 14000;
-  if(pxW > MAX_DIM){
-    dpi = Math.floor(dpi * MAX_DIM / pxW);
-    pxW = Math.round(wMm/25.4*dpi);
-    pxH = Math.round(hMm/25.4*dpi);
-  }
-  const svg = buildExportSVG();
-  const xml = new XMLSerializer().serializeToString(svg);
-  const svgBlob = new Blob([xml], {type:'image/svg+xml'});
-  const url = URL.createObjectURL(svgBlob);
-  const img = new Image();
-  img.onload = ()=>{
+$('btnPng').addEventListener('click', async function(){
+  if(exportBusy) return;
+  exportBusy = true;
+  setExportStatus('Preparando PNG…');
+  try{
+    const res = await buildDownloadSVG();
+    let dpi = 300;
+    let pxW = Math.round(res.wMm/25.4*dpi);
+    let pxH = Math.round(res.hMm/25.4*dpi);
+    const MAX_DIM = 14000;
+    if(pxW > MAX_DIM){
+      dpi = Math.floor(dpi * MAX_DIM / pxW);
+      pxW = Math.round(res.wMm/25.4*dpi);
+      pxH = Math.round(res.hMm/25.4*dpi);
+    }
+    const xml = new XMLSerializer().serializeToString(res.svg);
+    const url = URL.createObjectURL(new Blob([xml], {type:'image/svg+xml;charset=utf-8'}));
+    const img = new Image();
+    await new Promise(function(resolve, reject){ img.onload = resolve; img.onerror = reject; img.src = url; });
+    if(img.decode){ try{ await img.decode(); }catch(e){} }
     const canvas = document.createElement('canvas');
     canvas.width = pxW; canvas.height = pxH;
     const ctx = canvas.getContext('2d');
-    ctx.drawImage(img, 0,0, pxW, pxH);
+    // Primer dibujo: obliga al navegador a cargar las tipografías incrustadas. Tras una pausa se dibuja de nuevo ya con ellas.
+    ctx.drawImage(img, 0, 0, pxW, pxH);
+    await new Promise(function(r){ setTimeout(r, 300); });
+    ctx.clearRect(0, 0, pxW, pxH);
+    ctx.drawImage(img, 0, 0, pxW, pxH);
     URL.revokeObjectURL(url);
-    canvas.toBlob(blob=>{
-      const a = document.createElement('a');
-      a.href = URL.createObjectURL(blob);
-      a.download = `cinta-100sombreros-${dpi}dpi.png`;
-      a.click();
-    }, 'image/png');
-  };
-  img.src = url;
+    const blob = await new Promise(function(resolve){ canvas.toBlob(resolve, 'image/png'); });
+    if(!blob) throw new Error('png');
+    triggerDownload(blob, 'cinta-100sombreros-' + dpi + 'dpi.png');
+    setExportStatus(res.fontOk ? '' : FONT_WARNING);
+  }catch(err){
+    setExportStatus('No se pudo generar el PNG.');
+  }finally{
+    exportBusy = false;
+  }
 });
 
 // ---------- impresión paginada a tamaño real ----------
