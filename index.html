@@ -508,17 +508,16 @@
       </div>
     </div>
 
-    <p class="note">La vista en pantalla es orientativa (depende de tu monitor). Para el <strong>tamaño real garantizado</strong>, usa "Descargar SVG" (vectorial, para imprenta o plotter), "Descargar PNG 300dpi" o "Imprimir plantilla". Los tres exportan la <strong>cinta completa</strong>: 69 × 3,6 cm (69 cm de largo, y 3,6 cm de ancho ya con los 3 mm de sangrado incluidos arriba y abajo). "Distancia entre laterales / entre pares" es el hueco libre entre el borde de un elemento (o par) y el siguiente, no entre sus centros.</p>
+    <p class="note">La vista en pantalla es orientativa (depende de tu monitor). Para el <strong>tamaño real garantizado</strong>, usa "Descargar PNG" (máxima calidad) o "Imprimir plantilla". Las dos exportan la <strong>cinta completa</strong>: 69 × 3,6 cm (69 cm de largo, y 3,6 cm de ancho ya con los 3 mm de sangrado incluidos arriba y abajo). "Distancia entre laterales / entre pares" es el hueco libre entre el borde de un elemento (o par) y el siguiente, no entre sus centros.</p>
 
     <div class="actions">
-      <label class="ficha-toggle"><input type="checkbox" id="fichaToggle" checked><span>Incluir ficha con los datos del diseño (colores RGB, tipografía y alturas) en las descargas SVG y PNG</span></label>
+      <label class="ficha-toggle"><input type="checkbox" id="fichaToggle" checked><span>Incluir ficha con los datos del diseño (colores RGB, tipografía y alturas) en la descarga PNG</span></label>
       <label for="paperSize" style="align-self:center; margin:0 4px 0 0; color:var(--dim);">Papel:</label>
       <select id="paperSize" style="flex:0 0 140px;">
         <option value="a4" selected>A4</option>
         <option value="letter">Carta / Letter</option>
       </select>
-      <button id="btnSvg">Descargar SVG (tamaño real)</button>
-      <button id="btnPng">Descargar PNG 300dpi</button>
+      <button id="btnPng">Descargar PNG (máxima calidad)</button>
       <button id="btnPrint" class="primary">Imprimir plantilla a tamaño real</button>
     </div>
     <div class="export-status" id="exportStatus" role="status" aria-live="polite"></div>
@@ -841,7 +840,7 @@ function checkOverflow(svg){
   const elements = svg.querySelectorAll('text, image');
   const warningBox = $('overflowWarning');
   const msgBox = $('overflowMsg');
-  const btns = [$('btnSvg'), $('btnPng'), $('btnPrint')];
+  const btns = [$('btnPng'), $('btnPrint')];
 
   if(elements.length === 0){
     warningBox.classList.remove('visible');
@@ -964,9 +963,8 @@ function buildExportSVG(){
   return svg;
 }
 
-// ---------- descargas SVG / PNG: tipografía incrustada + ficha de datos ----------
+// ---------- descargas PNG / JPG (máxima calidad) + ficha de datos ----------
 let exportBusy = false;
-const fontCssCache = {};
 
 function setExportStatus(msg){
   const el = $('exportStatus');
@@ -986,83 +984,21 @@ function fontFamilyName(){
   const m = /^\s*['"]?([^'",]+)['"]?/.exec(state.textFont);
   return m ? m[1].trim() : String(state.textFont);
 }
+function fontFriendlyLabel(){
+  // Etiqueta tal como aparece en el desplegable, para que la ficha coincida con lo que el
+  // cliente ve y elige en el propio diseñador (el nombre técnico de Google Fonts no aparece ahí).
+  const sel = $('textFont');
+  if(sel && sel.selectedOptions && sel.selectedOptions[0]) return sel.selectedOptions[0].textContent.trim();
+  return fontFamilyName();
+}
 function textPresent(){ return state.textMode !== 'none' && state.textContent.trim() !== ''; }
 function logoPresent(){ return state.logoMode !== 'none' && !!state.logoDataUrl; }
-
-function arrayBufferToBase64(buf){
-  const bytes = new Uint8Array(buf);
-  let bin = '';
-  const chunk = 0x8000;
-  for(let i=0; i<bytes.length; i+=chunk){
-    bin += String.fromCharCode.apply(null, bytes.subarray(i, i+chunk));
-  }
-  return btoa(bin);
-}
-
-// Devuelve "Familia:wght@N" con el mismo peso que el navegador usa en pantalla
-// (el que carga el <link> de Google Fonts de esta página).
-function googleFontQuery(family){
-  const link = document.querySelector('link[href*="fonts.googleapis.com/css2"]');
-  if(!link) return null;
-  const href = link.getAttribute('href');
-  const parts = (href.split('?')[1] || '').split('&');
-  for(let i=0; i<parts.length; i++){
-    const p = parts[i];
-    if(p.indexOf('family=') !== 0) continue;
-    const spec = p.slice(7);
-    const rawName = spec.split(':')[0];
-    if(decodeURIComponent(rawName.replace(/\+/g,' ')) !== family) continue;
-    const wm = /wght@([\d;]+)$/.exec(spec);
-    if(!wm) return rawName;
-    const ws = wm[1].split(';').map(Number);
-    let w;
-    if(ws.indexOf(400) >= 0) w = 400;
-    else if(ws.indexOf(500) >= 0) w = 500;
-    else {
-      const up = ws.filter(function(x){ return x > 400; }).sort(function(a,b){ return a-b; });
-      w = up.length ? up[0] : Math.max.apply(null, ws);
-    }
-    return rawName + ':wght@' + w;
-  }
-  return null;
-}
-
-// Descarga la tipografía de Google Fonts y la devuelve como @font-face con los datos incrustados (base64).
-async function getEmbeddedFontCss(family){
-  if(fontCssCache[family] !== undefined) return fontCssCache[family];
-  const q = googleFontQuery(family);
-  if(!q) return '';
-  const cssRes = await fetch('https://fonts.googleapis.com/css2?family=' + q + '&display=swap');
-  if(!cssRes.ok) throw new Error('css ' + cssRes.status);
-  const css = await cssRes.text();
-  const re = /\/\*\s*([\w-]+)\s*\*\/\s*(@font-face\s*\{[^}]*\})/g;
-  const wanted = ['latin', 'latin-ext'];
-  let blocks = [];
-  let m;
-  while((m = re.exec(css)) !== null){
-    if(wanted.indexOf(m[1]) >= 0) blocks.push(m[2]);
-  }
-  if(!blocks.length) blocks = css.match(/@font-face\s*\{[^}]*\}/g) || [];
-  let out = '';
-  for(let i=0; i<blocks.length; i++){
-    let block = blocks[i];
-    const u = /url\((https:[^)]+)\)/.exec(block);
-    if(!u) continue;
-    const fr = await fetch(u[1]);
-    if(!fr.ok) throw new Error('font ' + fr.status);
-    const b64 = arrayBufferToBase64(await fr.arrayBuffer());
-    block = block.replace(u[1], 'data:font/woff2;base64,' + b64);
-    out += block + '\n';
-  }
-  fontCssCache[family] = out;
-  return out;
-}
 
 function buildFichaLines(){
   const lines = [];
   lines.push({label:'Color de la cinta:', value:colorLabel(state.ribbonColor), swatch:state.ribbonColor});
   if(textPresent()){
-    lines.push({label:'Tipografía:', value:fontFamilyName() + '  —  altura ' + fmtCm(state.textSizeCm) + ' cm'});
+    lines.push({label:'Tipografía:', value:fontFriendlyLabel() + ' (' + fontFamilyName() + ')' + '  —  altura ' + fmtCm(state.textSizeCm) + ' cm'});
     lines.push({label:'Color de la tipografía:', value:colorLabel(state.textColor), swatch:state.textColor});
   }
   if(logoPresent()){
@@ -1123,41 +1059,124 @@ function appendFicha(svg, wMm, artHMm, lines){
   return totalH;
 }
 
-// Construye el SVG de descarga: diseño + tipografía incrustada + datos (<desc> siempre, ficha visible opcional)
-async function buildDownloadSVG(){
-  const ns = 'http://www.w3.org/2000/svg';
+// Construye el SVG que se va a rasterizar: diseño + ficha de datos opcional.
+// El texto se dibuja con la tipografía que el propio navegador ya tiene cargada en esta
+// página (la misma que ves en la vista previa), así que al convertir a píxeles (PNG/JPG)
+// siempre sale correcta, sin depender de que el archivo final "sepa" qué tipografía es.
+function buildRasterSVG(){
   const svg = buildExportSVG();
   const wMm = EXPORT_LEN_CM * MM_PER_CM;
   const artHMm = EXPORT_WID_CM * MM_PER_CM;
-  const lines = buildFichaLines();
-
-  let fontOk = true;
-  if(textPresent()){
-    try{
-      const css = await getEmbeddedFontCss(fontFamilyName());
-      if(css){
-        const defs = document.createElementNS(ns, 'defs');
-        const style = document.createElementNS(ns, 'style');
-        style.setAttribute('type', 'text/css');
-        style.textContent = css;
-        defs.appendChild(style);
-        svg.insertBefore(defs, svg.firstChild);
-      } else {
-        fontOk = false;
-      }
-    }catch(e){
-      fontOk = false;
-    }
-  }
-
-  const desc = document.createElementNS(ns, 'desc');
-  desc.textContent = lines.map(function(l){ return l.label + ' ' + l.value; }).join(' | ');
-  svg.insertBefore(desc, svg.firstChild);
-
   let hMm = artHMm;
   const toggle = $('fichaToggle');
-  if(toggle && toggle.checked) hMm = appendFicha(svg, wMm, artHMm, lines);
-  return {svg:svg, wMm:wMm, hMm:hMm, fontOk:fontOk};
+  if(toggle && toggle.checked) hMm = appendFicha(svg, wMm, artHMm, buildFichaLines());
+  return {svg:svg, wMm:wMm, hMm:hMm};
+}
+
+// Obliga a que la tipografía elegida esté realmente cargada y lista antes de dibujar
+// (si no, el canvas la dibujaría con una tipografía por defecto sin avisar).
+async function ensureFontsReady(){
+  const jobs = [];
+  if(textPresent()){
+    const family = fontFamilyName();
+    const px = Math.max(8, Math.round(state.textSizeCm * MM_PER_CM * 3.78));
+    jobs.push(document.fonts.load('"' + family + '"').catch(function(){}));
+    jobs.push(document.fonts.load(px + 'px "' + family + '"').catch(function(){}));
+  }
+  jobs.push(document.fonts.load('bold 12px Arial').catch(function(){}));
+  try{ await Promise.all(jobs); }catch(e){}
+  if(document.fonts.ready) await document.fonts.ready;
+}
+
+function svgAttr(el, name, fallback){
+  const v = el.getAttribute(name);
+  return (v === null || v === '') ? fallback : v;
+}
+function svgNum(el, name){ return parseFloat(el.getAttribute(name)) || 0; }
+
+const rasterImgCache = {};
+function loadImageOnce(src){
+  if(rasterImgCache[src]) return rasterImgCache[src];
+  const p = new Promise(function(resolve, reject){
+    const img = new Image();
+    img.onload = function(){ resolve(img); };
+    img.onerror = reject;
+    img.src = src;
+  });
+  rasterImgCache[src] = p;
+  return p;
+}
+
+// Dibuja los mismos nodos que lleva el SVG de descarga (fondo, texto, logo, ficha) directamente
+// en el canvas, usando la tipografía ya cargada en esta página — así la descarga sale siempre
+// con la tipografía correcta, sin pasar por el paso intermedio (SVG como imagen) que fallaba.
+async function drawDesignToCanvas(ctx, svg, scale){
+  const nodes = Array.from(svg.children).filter(function(n){ return n.tagName !== 'defs'; });
+  for(const node of nodes){
+    const tag = node.tagName.toLowerCase();
+    if(tag === 'rect'){
+      ctx.fillStyle = svgAttr(node, 'fill', '#000000');
+      ctx.fillRect(svgNum(node,'x')*scale, svgNum(node,'y')*scale, svgNum(node,'width')*scale, svgNum(node,'height')*scale);
+    } else if(tag === 'image'){
+      const href = node.getAttribute('href') || node.getAttributeNS('http://www.w3.org/1999/xlink','href');
+      const img = await loadImageOnce(href);
+      ctx.drawImage(img, svgNum(node,'x')*scale, svgNum(node,'y')*scale, svgNum(node,'width')*scale, svgNum(node,'height')*scale);
+    } else if(tag === 'text'){
+      const x = svgNum(node,'x')*scale, y = svgNum(node,'y')*scale;
+      const anchor = svgAttr(node,'text-anchor','start');
+      const kids = Array.from(node.children);
+      if(kids.length){
+        // línea de ficha: <tspan> en negrita (etiqueta) + <tspan> normal (valor)
+        const family = svgAttr(node,'font-family','Arial, Helvetica, sans-serif');
+        const size = svgNum(node,'font-size')*scale;
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'alphabetic';
+        ctx.fillStyle = svgAttr(node,'fill','#000000');
+        let cx = x;
+        for(const child of kids){
+          const weight = svgAttr(child,'font-weight','normal');
+          ctx.font = weight + ' ' + size + 'px ' + family;
+          cx += svgNum(child,'dx')*scale;
+          ctx.fillText(child.textContent, cx, y);
+          cx += ctx.measureText(child.textContent).width;
+        }
+      } else {
+        const family = svgAttr(node,'font-family','Arial, Helvetica, sans-serif');
+        const size = svgNum(node,'font-size')*scale;
+        const ls = svgNum(node,'letter-spacing')*scale;
+        const weight = svgAttr(node,'font-weight','normal');
+        ctx.font = weight + ' ' + size + 'px ' + family;
+        ctx.fillStyle = svgAttr(node,'fill','#000000');
+        ctx.textAlign = anchor === 'middle' ? 'center' : (anchor === 'end' ? 'right' : 'left');
+        ctx.textBaseline = 'alphabetic';
+        if(ls && ('letterSpacing' in ctx)){ ctx.letterSpacing = ls + 'px'; }
+        ctx.fillText(node.textContent, x, y);
+        if('letterSpacing' in ctx){ ctx.letterSpacing = '0px'; }
+      }
+    }
+  }
+}
+
+// Rasteriza el diseño a un <canvas> a la resolución (dpi) pedida, con el margen de seguridad
+// de MAX_DIM para no reventar el límite de tamaño de canvas del navegador.
+async function rasterizeDesign(dpi){
+  await ensureFontsReady();
+  const res = buildRasterSVG();
+  let pxW = Math.round(res.wMm/25.4*dpi);
+  let pxH = Math.round(res.hMm/25.4*dpi);
+  const MAX_DIM = 14000;
+  if(pxW > MAX_DIM || pxH > MAX_DIM){
+    const factor = MAX_DIM / Math.max(pxW, pxH);
+    dpi = Math.floor(dpi * factor);
+    pxW = Math.round(res.wMm/25.4*dpi);
+    pxH = Math.round(res.hMm/25.4*dpi);
+  }
+  const scale = pxW / res.wMm; // píxeles por mm reales, consistente aunque se haya reducido el dpi
+  const canvas = document.createElement('canvas');
+  canvas.width = pxW; canvas.height = pxH;
+  const ctx = canvas.getContext('2d');
+  await drawDesignToCanvas(ctx, res.svg, scale);
+  return {canvas:canvas, dpi:dpi};
 }
 
 function triggerDownload(blob, filename){
@@ -1169,69 +1188,25 @@ function triggerDownload(blob, filename){
   document.body.removeChild(a);
   setTimeout(function(){ URL.revokeObjectURL(url); }, 2000);
 }
-const FONT_WARNING = 'No se pudo incrustar la tipografía (sin conexión con Google Fonts). El archivo se ha descargado, pero puede mostrarse con otra tipografía.';
 
-$('btnSvg').addEventListener('click', async function(){
-  if(exportBusy) return;
-  exportBusy = true;
-  setExportStatus('Preparando SVG…');
-  try{
-    const res = await buildDownloadSVG();
-    const xml = '<?xml version="1.0" encoding="UTF-8"?>\n' + new XMLSerializer().serializeToString(res.svg);
-    triggerDownload(new Blob([xml], {type:'image/svg+xml;charset=utf-8'}), 'cinta-100sombreros.svg');
-    setExportStatus(res.fontOk ? '' : FONT_WARNING);
-  }catch(err){
-    setExportStatus('No se pudo generar el SVG.');
-  }finally{
-    exportBusy = false;
-  }
-});
+const MAX_QUALITY_DPI = 600;
 
 $('btnPng').addEventListener('click', async function(){
   if(exportBusy) return;
   exportBusy = true;
   setExportStatus('Preparando PNG…');
   try{
-    const res = await buildDownloadSVG();
-    let dpi = 300;
-    let pxW = Math.round(res.wMm/25.4*dpi);
-    let pxH = Math.round(res.hMm/25.4*dpi);
-    const MAX_DIM = 14000;
-    if(pxW > MAX_DIM){
-      dpi = Math.floor(dpi * MAX_DIM / pxW);
-      pxW = Math.round(res.wMm/25.4*dpi);
-      pxH = Math.round(res.hMm/25.4*dpi);
-    }
-    const xml = new XMLSerializer().serializeToString(res.svg);
-    const url = URL.createObjectURL(new Blob([xml], {type:'image/svg+xml;charset=utf-8'}));
-    const img = new Image();
-    await new Promise(function(resolve, reject){ img.onload = resolve; img.onerror = reject; img.src = url; });
-    if(img.decode){ try{ await img.decode(); }catch(e){} }
-    const canvas = document.createElement('canvas');
-    canvas.width = pxW; canvas.height = pxH;
-    const ctx = canvas.getContext('2d');
-    // Primer dibujo: obliga al navegador a cargar las tipografías incrustadas. Tras una pausa se dibuja de nuevo ya con ellas.
-    ctx.drawImage(img, 0, 0, pxW, pxH);
-    await new Promise(function(r){ setTimeout(r, 300); });
-    ctx.clearRect(0, 0, pxW, pxH);
-    ctx.drawImage(img, 0, 0, pxW, pxH);
-    URL.revokeObjectURL(url);
-    const blob = await new Promise(function(resolve){ canvas.toBlob(resolve, 'image/png'); });
+    const res = await rasterizeDesign(MAX_QUALITY_DPI);
+    const blob = await new Promise(function(resolve){ res.canvas.toBlob(resolve, 'image/png'); });
     if(!blob) throw new Error('png');
-    triggerDownload(blob, 'cinta-100sombreros-' + dpi + 'dpi.png');
-    setExportStatus(res.fontOk ? '' : FONT_WARNING);
+    triggerDownload(blob, 'cinta-100sombreros-' + res.dpi + 'dpi.png');
+    setExportStatus('');
   }catch(err){
     setExportStatus('No se pudo generar el PNG.');
   }finally{
     exportBusy = false;
   }
 });
-
-// ---------- impresión paginada a tamaño real ----------
-const PAPER = {
-  a4:     { usableLenCm: 27 },
-  letter: { usableLenCm: 25.9 },
-};
 
 $('btnPrint').addEventListener('click', ()=>{
   buildPrintPages();
